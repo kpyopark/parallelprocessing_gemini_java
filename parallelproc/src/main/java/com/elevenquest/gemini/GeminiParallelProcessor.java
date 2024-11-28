@@ -1,6 +1,22 @@
-import com.google.cloud.bigquery.*;
+package com.elevenquest.gemini;
+
+import com.google.cloud.bigquery.BigQuery;
+import com.google.cloud.bigquery.BigQueryException;
+import com.google.cloud.bigquery.BigQueryOptions;
+import com.google.cloud.bigquery.Schema;
 import com.google.cloud.vertexai.VertexAI;
 import com.google.cloud.vertexai.generativeai.*;
+import com.google.cloud.vertexai.api.*;
+import com.google.cloud.bigquery.Field;
+import com.google.cloud.bigquery.InsertAllRequest;
+import com.google.cloud.bigquery.InsertAllResponse;
+import com.google.cloud.bigquery.QueryJobConfiguration;
+import com.google.cloud.bigquery.StandardSQLTypeName;
+import com.google.cloud.bigquery.StandardTableDefinition;
+import com.google.cloud.bigquery.TableDefinition;
+import com.google.cloud.bigquery.TableId;
+import com.google.cloud.bigquery.TableInfo;
+import com.google.cloud.bigquery.TableResult;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 
@@ -57,10 +73,8 @@ public class GeminiParallelProcessor {
                 .setTopP(0.95f)
                 .build();
                 
-        this.model = new GenerativeModel.Builder()
-                .setModelName("gemini-1.5-flash-002")
-                .setGenerationConfig(generationConfig)
-                .build(vertexAI);
+        this.model = new GenerativeModel("gemini-1.5-flash-002", vertexAI)
+            .withGenerationConfig(generationConfig);
         
         // Create result table
         createResultTable();
@@ -105,15 +119,17 @@ public class GeminiParallelProcessor {
     private Map<String, Object> processSingleRequest(Map<String, Object> row) {
         Map<String, Object> result = new HashMap<>();
         try {
-            List<String> prompts = new ArrayList<>();
-            prompts.add((String) row.get("input_text"));
+            //List<String> prompts = new ArrayList<>();
+            //prompts.add((String) row.get("input_text"));
+            String prompt = row.get("input_text").toString();
             
-            GenerateContentResponse response = model.generateContent(prompts);
-            String responseText = response.getText();
-            
+            GenerateContentResponse response = model.generateContent(prompt);
+            String responseText = response.getCandidates(0).getContent().getParts(0).getText();
+            ObjectMapper mapper = new ObjectMapper();
+            String jsonStr = mapper.writeValueAsString(parseGeminiResponse(responseText));
             result.put("id", row.get("id"));
             result.put("input_text", row.get("input_text"));
-            result.put("output_text", responseText);
+            result.put("output_text", jsonStr);
             result.put("status", "success");
             result.put("error", null);
             result.put("processed_at", LocalDateTime.now());
@@ -185,7 +201,7 @@ public class GeminiParallelProcessor {
             QueryJobConfiguration queryConfig = QueryJobConfiguration.newBuilder(query).build();
             try {
                 TableResult result = bigquery.query(queryConfig);
-                if (!result.hasNext()) {
+                if (!result.hasNextPage()) {
                     break;
                 }
                 
@@ -196,7 +212,7 @@ public class GeminiParallelProcessor {
                 List<Map<String, Object>> allRows = new ArrayList<>();
                 result.iterateAll().forEach(row -> {
                     Map<String, Object> rowMap = new HashMap<>();
-                    row.getSchema().getFields().forEach(field -> 
+                    result.getSchema().getFields().forEach(field -> 
                         rowMap.put(field.getName(), row.get(field.getName()).getValue())
                     );
                     allRows.add(rowMap);
@@ -220,9 +236,9 @@ public class GeminiParallelProcessor {
                 
                 for (Future<Map<String, Object>> future : futures) {
                     try {
-                        Map<String, Object> result = future.get();
-                        results.add(result);
-                        if ("success".equals(result.get("status"))) {
+                        Map<String, Object> futureReslt = future.get();
+                        results.add(futureReslt);
+                        if ("success".equals(futureReslt.get("status"))) {
                             successCount++;
                         } else {
                             errorCount++;
