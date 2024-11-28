@@ -21,6 +21,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.core.JsonProcessingException;
 
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.logging.*;
@@ -30,6 +31,7 @@ public class GeminiParallelProcessor {
     private final String projectId;
     private final String location;
     private final String inputQuery;
+    private final String dataset;
     private final String outputTable;
     private final String resultTable;
     private final int batchSize;
@@ -45,6 +47,7 @@ public class GeminiParallelProcessor {
             String projectId,
             String location,
             String inputQuery,
+            String dataset,
             String outputTable,
             String resultTable,
             int batchSize,
@@ -54,6 +57,7 @@ public class GeminiParallelProcessor {
         this.projectId = projectId;
         this.location = location;
         this.inputQuery = inputQuery;
+        this.dataset = dataset;
         this.outputTable = outputTable;
         this.resultTable = resultTable;
         this.batchSize = batchSize;
@@ -92,7 +96,7 @@ public class GeminiParallelProcessor {
                 Field.of("status", StandardSQLTypeName.STRING)
             );
             
-            TableId tableId = TableId.of(projectId, resultTable);
+            TableId tableId = TableId.of(dataset, resultTable);
             TableDefinition tableDefinition = StandardTableDefinition.of(schema);
             TableInfo tableInfo = TableInfo.newBuilder(tableId, tableDefinition).build();
             
@@ -150,8 +154,8 @@ public class GeminiParallelProcessor {
             List<InsertAllRequest.RowToInsert> rows = results.stream()
                 .map(result -> InsertAllRequest.RowToInsert.of(result))
                 .collect(Collectors.toList());
-            
-            TableId tableId = TableId.of(projectId, outputTable);
+            logger.info("projectId, outputTable: " + projectId + ":" + outputTable);
+            TableId tableId = TableId.of(dataset, outputTable);
             InsertAllRequest insertRequest = InsertAllRequest.newBuilder(tableId)
                 .setRows(rows)
                 .build();
@@ -174,15 +178,19 @@ public class GeminiParallelProcessor {
             int successCount,
             int errorCount
     ) {
+        DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSSSSS");
+        String startTimeStr = startTime.format(formatter);
+        String endTimeStr = endTime.format(formatter);
+        
         String query = String.format(
             "INSERT INTO `%s.%s` "
             + "(batch_id, process_start_time, process_end_time, processed_count, "
             + "success_count, error_count, status) "
             + "VALUES ('%s', TIMESTAMP('%s'), TIMESTAMP('%s'), %d, %d, %d, 'COMPLETED')",
-            projectId, resultTable, batchId, startTime, endTime,
+            dataset, resultTable, batchId, startTimeStr, endTimeStr,
             processedCount, successCount, errorCount
         );
-        
+
         QueryJobConfiguration queryConfig = QueryJobConfiguration.newBuilder(query).build();
         try {
             bigquery.query(queryConfig);
@@ -193,18 +201,21 @@ public class GeminiParallelProcessor {
     }
     
     public void processBatch() {
+        logger.info("Starting batch processing");
         int offset = 0;
         while (true) {
             String query = String.format("%s LIMIT %d OFFSET %d",
                     inputQuery, batchSize, offset);
-            
+            logger.info("Executing query: " + query);
             QueryJobConfiguration queryConfig = QueryJobConfiguration.newBuilder(query).build();
             try {
                 TableResult result = bigquery.query(queryConfig);
-                if (!result.hasNextPage()) {
+                logger.info("total records: " + result.getTotalRows());
+                if (result.getTotalRows() == 0) {
                     break;
                 }
-                
+
+                logger.info(String.format("Processing batch %d", offset));
                 String batchId = String.format("batch_%s_%d",
                         LocalDateTime.now().toString().replace(":", ""), offset);
                 LocalDateTime startTime = LocalDateTime.now();
@@ -248,6 +259,8 @@ public class GeminiParallelProcessor {
                         errorCount++;
                     }
                 }
+                logger.info(String.format("Processed %d items in batch %s",
+                        results.size(), batchId));
                 
                 executor.shutdown();
                 saveResultsToBQ(results, batchId);
@@ -272,15 +285,19 @@ public class GeminiParallelProcessor {
         String projectId = System.getenv("PROJECT_ID");
         String location = System.getenv("LOCATION");
         String datasetId = System.getenv("DATASET_ID");
+        System.out.println("projectId:" +projectId);
+        System.out.println("location:" +location);
+        System.out.println("datasetId:" +datasetId);
         
         GeminiParallelProcessor processor = new GeminiParallelProcessor(
             projectId,
             location,
             "SELECT 1 as id, 'you should respond the users request. users request is \"How old are you?\". output format should be JSON.' as input_text",
-            datasetId + ".processing_results",
-            datasetId + ".batch_status",
-            100000,
-            10000,
+            datasetId,
+            "processing_results",
+            "batch_status",
+            1000,
+            100,
             10
         );
         
